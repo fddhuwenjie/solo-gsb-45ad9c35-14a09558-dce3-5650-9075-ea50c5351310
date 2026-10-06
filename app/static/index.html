@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 遮盖工作台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --line: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --danger: #f87171;
+    --ok: #34d399; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+  header .spacer { flex: 1; }
+  .btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: #0369a1; border-color: #0ea5e9; color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: #0284c7; color: #fff; }
+  .btn.danger { color: var(--danger); }
+  .btn.danger:hover:not(:disabled) { border-color: var(--danger); }
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* 左侧工具栏 */
+  aside {
+    width: 264px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--line); padding: 14px; overflow-y: auto;
+  }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+             color: var(--muted); margin: 18px 0 8px; }
+  aside h2:first-child { margin-top: 0; }
+  .file-label {
+    display: block; border: 1.5px dashed var(--line); border-radius: 8px;
+    padding: 16px 10px; text-align: center; color: var(--muted); cursor: pointer;
+  }
+  .file-label:hover { border-color: var(--accent); color: var(--accent); }
+  .file-label input { display: none; }
+  .mode-group { display: flex; gap: 6px; }
+  .mode-group .btn { flex: 1; }
+  .mode-group .btn.active { background: #0369a1; border-color: #0ea5e9; color: #fff; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  select, input[type="color"] {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px;
+  }
+  select { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hint kbd {
+    background: var(--panel2); border: 1px solid var(--line);
+    border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px;
+  }
+  ul.boxlist { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; }
+  ul.boxlist li {
+    display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+    border-radius: 5px; font-size: 12px; cursor: pointer;
+  }
+  ul.boxlist li:hover { background: var(--panel2); }
+  ul.boxlist .swatch { width: 12px; height: 12px; border-radius: 2px;
+    border: 1px solid rgba(255,255,255,.3); flex: none; }
+  ul.boxlist .del { margin-left: auto; color: var(--danger); }
+  ul.boxlist .empty { color: var(--muted); cursor: default; }
+
+  /* 预览区 */
+  .stage-wrap { flex: 1; overflow: auto; padding: 24px; position: relative; }
+  .stage { position: relative; margin: 0 auto; width: max-content;
+           box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+  #pageImg, #overlay {
+    display: block; width: var(--view-w); height: var(--view-h);
+    background: #fff;
+  }
+  #overlay { position: absolute; inset: 0; touch-action: none; }
+  #overlay.draw { cursor: crosshair; }
+  #overlay.erase { cursor: not-allowed; }
+
+  .zoombar {
+    position: sticky; bottom: 12px; margin: 16px auto -4px; width: max-content;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 8px; display: flex; align-items: center; gap: 4px;
+  }
+  .zoombar .btn { border-radius: 999px; padding: 3px 10px; }
+  .zoombar #zoomLabel { min-width: 58px; text-align: center; color: var(--muted); }
+
+  .toast {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: #7f1d1d; border: 1px solid var(--danger); color: #fee2e2;
+    padding: 10px 18px; border-radius: 8px; z-index: 50; max-width: 70vw;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  .toast.ok { background: #064e3b; border-color: var(--ok); color: #d1fae5; }
+  .badge { background: var(--panel2); border: 1px solid var(--line);
+           border-radius: 6px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
+  .baked-note {
+    background: #422006; border: 1px solid var(--warn); color: #fef3c7;
+    border-radius: 6px; padding: 6px 10px; font-size: 12px; margin-top: 10px;
+  }
+  .chk { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+
+  /* 逐页复核 */
+  ul.reviewlist { list-style: none; margin: 0; padding: 0; }
+  ul.reviewlist li {
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    border-radius: 6px; font-size: 12px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  ul.reviewlist li:hover { background: var(--panel2); }
+  ul.reviewlist li.current { border-color: var(--accent); }
+  ul.reviewlist .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  ul.reviewlist .dot.pending { background: var(--warn); }
+  ul.reviewlist .dot.done { background: var(--ok); }
+  ul.reviewlist .pname { flex: none; }
+  ul.reviewlist .pstatus { margin-left: auto; color: var(--muted); }
+  ul.reviewlist li.done .pstatus { color: var(--ok); }
+  .reviewbar {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; margin-top: 10px;
+  }
+  .reviewbar .rb-title { font-size: 13px; margin-bottom: 6px; display: flex;
+                         align-items: center; gap: 8px; }
+  .reviewbar .rb-title .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px;
+                              border: 1px solid var(--line); color: var(--muted); }
+  .reviewbar .rb-title .tag.done { color: var(--ok); border-color: var(--ok); }
+  .reviewbar .rb-hint { color: var(--muted); font-size: 11.5px; margin: 4px 0 8px; }
+  .reviewbar .rb-hint.warn { color: var(--warn); }
+  .reviewbar button { width: 100%; }
+  .delivery-note { font-size: 11.5px; color: var(--muted); margin-top: 6px;
+                   word-break: break-all; }
+  .delivery-note .sha { color: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>📄 PDF 遮盖工作台</h1>
+  <span class="badge" id="fileBadge">尚未打开文档</span>
+  <div class="spacer"></div>
+  <button class="btn" id="prevPageTop" disabled>‹ 上一页</button>
+  <span class="badge" id="pageBadge">— / —</span>
+  <button class="btn" id="nextPageTop" disabled>下一页 ›</button>
+  <button class="btn" id="downloadBtn" disabled title="无需复核，随时可下载当前遮盖副本">⬇ 普通下载（PDF）</button>
+  <button class="btn primary" id="deliveryBtn" disabled>🏁 定版交付（ZIP）</button>
+</header>
+
+<main>
+  <aside>
+    <h2>文档</h2>
+    <label class="file-label">
+      选择 PDF（1–8 页，≤100MB）
+      <input type="file" id="fileInput" accept="application/pdf,.pdf">
+    </label>
+    <div class="hint" id="pageInfo" style="margin-top:8px"></div>
+
+    <h2>工具</h2>
+    <div class="mode-group">
+      <button class="btn active" id="modeDraw">✏️ 画框</button>
+      <button class="btn" id="modeErase">🩹 删除</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="hint">颜色</span>
+      <select id="colorSelect">
+        <option value="black">不透明黑</option>
+        <option value="white">不透明白</option>
+        <option value="red">红</option>
+        <option value="blue">蓝</option>
+        <option value="green">绿</option>
+        <option value="yellow">黄</option>
+      </select>
+    </div>
+    <label class="chk hint" style="margin-top:8px">
+      <input type="checkbox" id="bakedToggle"> 最终效果预览（服务器烘焙）
+    </label>
+    <div class="baked-note" id="bakedNote" hidden>
+      此图由服务器用与下载完全相同的光栅化路径生成；该模式下不可编辑，关闭后继续画框。
+      此画面也是<b>逐页复核</b>的依据：加载后可"确认本页"，确认绑定本画面版本；
+      若期间框被改动，须重新加载预览，不能确认旧画面。
+    </div>
+
+    <h2>本页遮盖框 <span class="hint" id="boxCount"></span></h2>
+    <ul class="boxlist" id="boxList"></ul>
+    <button class="btn danger" id="clearPageBtn" style="width:100%;margin-top:8px" disabled>
+      清空本页所有框
+    </button>
+
+    <h2>逐页复核</h2>
+    <ul class="reviewlist" id="reviewList"></ul>
+    <div class="reviewbar" id="reviewBar" hidden>
+      <div class="rb-title">
+        第 <span id="rbPage">1</span> 页
+        <span class="tag" id="rbTag">待复核</span>
+      </div>
+      <div class="rb-hint" id="rbHint">勾选"最终效果预览（服务器烘焙）"加载该页的实际烘焙画面后，方可确认本页。</div>
+      <div class="rb-hint warn" id="rbStale" hidden>
+        ⚠ 此画面是旧版本：加载后本页遮盖框又被修改。请重新加载烘焙预览后再确认，不能把旧画面标为已复核。
+        <button class="btn" id="rbReload" style="width:100%;margin-top:6px">↻ 重新加载本页烘焙预览</button>
+      </div>
+      <button class="btn primary" id="confirmPageBtn" disabled>✔ 确认本页（绑定当前烘焙画面）</button>
+    </div>
+
+    <h2>定版交付</h2>
+    <div class="hint" style="margin-bottom:8px">
+      全部页面（含没有遮盖框的页）逐页确认后，可生成包含
+      <b>位图遮盖 PDF</b> 与 <b>manifest.json</b>（各页确认框数、PDF 的 SHA-256）的 ZIP。
+    </div>
+    <button class="btn primary" id="deliverySideBtn" style="width:100%" disabled>🏁 全部确认后生成定版 ZIP</button>
+    <div class="delivery-note" id="deliveryNote" hidden></div>
+
+    <h2>操作说明</h2>
+    <div class="hint">
+      <p style="margin:4px 0">· 画框模式：在页面上按住拖动，松开即添加。</p>
+      <p style="margin:4px 0">· 删除模式：点击框删除；或在画框模式悬停框后按 <kbd>Delete</kbd>。</p>
+      <p style="margin:4px 0">· <kbd>←</kbd> <kbd>→</kbd> 翻页，<kbd>+</kbd> <kbd>−</kbd> 缩放，<kbd>D</kbd>/<kbd>E</kbd> 切换工具。</p>
+      <p style="margin:4px 0">· 坐标以 PDF 点存储，任意缩放下框都锚定相同内容；旋转页与裁切页同样准确。</p>
+    </div>
+  </aside>
+
+  <div class="stage-wrap" id="stageWrap">
+    <div class="stage" id="stage" hidden>
+      <img id="pageImg" alt="PDF 页面预览">
+      <canvas id="overlay" class="draw"></canvas>
+    </div>
+    <div class="zoombar" id="zoombar" hidden>
+      <button class="btn" id="zoomOut">−</button>
+      <span id="zoomLabel">100%</span>
+      <button class="btn" id="zoomIn">＋</button>
+      <button class="btn" id="zoomFit">适应</button>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// 服务器渲染底图时使用的固定缩放（保证清晰度）；显示缩放由 CSS width/height 完成，
+// canvas 与 <img> 同尺寸，所有框坐标统一换算为 PDF 点。
+const RENDER_SCALE = 2.0;
+const MIN_ZOOM = 0.2, MAX_ZOOM = 4.0, ZOOM_STEP = 1.15;
+const MIN_BOX_PT = 1.0;   // 小于 1 点视为误触，不提交
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  sid: null,
+  filename: "document.pdf",
+  pages: [],                 // [{index,width,height,rotation}]
+  boxes: {},                 // pageIndex -> [{id,x0,y0,x1,y1,color}]
+  versions: {},              // pageIndex -> 服务器遮盖版本号
+  reviews: {},               // pageIndex(str) -> {confirmed,version,boxCount,confirmedVersion,...}
+  delivery: null,            // {id,pdfSha256,zipName,revoked,builtAt}
+  page: 0,
+  zoom: 1.0,
+  imgScale: 1,               // CSS 像素 -> PDF 点 的系数（随底图尺寸更新）
+  mode: "draw",
+  baked: false,
+  loadedVersion: null,       // 当前展示画面烘焙时绑定的遮盖版本（仅 baked 模式）
+  loadSeq: 0,                // 预览请求序号，丢弃过期响应
+  drag: null,                // {x0,y0,x1,y1} CSS 像素
+  hoverId: null,
+  busy: false,
+};
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+function toast(msg, ok = false) {
+  const el = document.createElement("div");
+  el.className = "toast" + (ok ? " ok" : "");
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    let detail = `请求失败（${res.status}）`;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function curPage() { return state.pages[state.page]; }
+function curBoxes() { return state.boxes[state.page] || []; }
+function pageW() { return curPage() ? curPage().width : 0; }
+function pageH() { return curPage() ? curPage().height : 0; }
+
+// CSS 像素 -> PDF 显示坐标点
+function cssToPt(x, y) { return { x: x * state.imgScale, y: y * state.imgScale }; }
+
+// ---------------------------------------------------------------------------
+// 底图加载（缩放改变时只改 CSS 尺寸；换页 / 切换烘焙模式时重新取图）
+// ---------------------------------------------------------------------------
+const img = $("pageImg"), canvas = $("overlay"), stage = $("stage");
+const ctx = canvas.getContext("2d");
+
+function applyViewSize() {
+  if (!curPage()) return;
+  const w = Math.round(pageW() * state.zoom);
+  const h = Math.round(pageH() * state.zoom);
+  stage.style.setProperty("--view-w", w + "px");
+  stage.style.setProperty("--view-h", h + "px");
+  canvas.width = w; canvas.height = h;
+  state.imgScale = pageW() / w;   // css px -> pt
+  $("zoomLabel").textContent = Math.round(state.zoom * 100) + "%";
+}
+
+let imgObjectUrl = null;
+
+function applyImageBlob(blob) {
+  if (imgObjectUrl) URL.revokeObjectURL(imgObjectUrl);
+  imgObjectUrl = URL.createObjectURL(blob);
+  img.src = imgObjectUrl;
+}
+
+function loadPageImage() {
+  if (!state.sid) return;
+  const seq = ++state.loadSeq;
+  const pageAtRequest = state.page;
+  const red = state.baked ? "&redacted=true" : "";
+  const url = `/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}${red}`;
+  state.loadedVersion = null;
+
+  if (!state.baked) {
+    // 干净底图无需版本头，直接用 <img src>（后端 Cache-Control: no-store）
+    if (imgObjectUrl) { URL.revokeObjectURL(imgObjectUrl); imgObjectUrl = null; }
+    img.src = url;
+    refreshReviewUi();
+    return;
+  }
+
+  // 烘焙预览必须读取该画面绑定的遮盖版本（X-Box-Version），复核确认时回传
+  fetch(url, { cache: "no-store" })
+    .then(async (res) => {
+      if (!res.ok) throw new Error("预览请求失败");
+      const ver = parseInt(res.headers.get("X-Box-Version") ?? "", 10);
+      const blob = await res.blob();
+      if (seq !== state.loadSeq || pageAtRequest !== state.page) return;
+      state.loadedVersion = Number.isFinite(ver) ? ver : null;
+      applyImageBlob(blob);
+      refreshReviewUi();
+    })
+    .catch(() => {
+      if (seq === state.loadSeq) toast("服务器烘焙预览加载失败，请重试。");
+    });
+}
+
+img.onload = () => { applyViewSize(); render(); };
+
+// ---------------------------------------------------------------------------
+// 遮盖框绘制（即时反映当前遮盖状态）
+// ---------------------------------------------------------------------------
+const COLOR_HEX = {
+  black: "#000000", white: "#ffffff", red: "#dc2626",
+  blue: "#2563eb", green: "#16a34a", yellow: "#e3b41e",
+};
+
+function ptToCssPx(v) { return v / state.imgScale; }
+
+function drawBox(b, opts = {}) {
+  const x = ptToCssPx(Math.min(b.x0, b.x1));
+  const y = ptToCssPx(Math.min(b.y0, b.y1));
+  const w = ptToCssPx(Math.abs(b.x1 - b.x0));
+  const h = ptToCssPx(Math.abs(b.y1 - b.y0));
+  ctx.fillStyle = COLOR_HEX[b.color] || "#000";
+  ctx.fillRect(x, y, w, h);
+  if (opts.hover || opts.preview) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = opts.hover ? "#f43f5e" : "#38bdf8";
+    ctx.setLineDash(opts.preview ? [6, 4] : []);
+    ctx.strokeRect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2));
+    ctx.setLineDash([]);
+  }
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!curPage() || state.baked) return;
+  for (const b of curBoxes()) drawBox(b, { hover: state.hoverId === b.id });
+  if (state.drag) {
+    drawBox({
+      x0: state.drag.x0 * state.imgScale,
+      y0: state.drag.y0 * state.imgScale,
+      x1: state.drag.x1 * state.imgScale,
+      y1: state.drag.y1 * state.imgScale,
+      color: $("colorSelect").value,
+    }, { preview: true });
+  }
+}
+
+function hitTest(cssX, cssY) {
+  const { x, y } = cssToPt(cssX, cssY);
+  const boxes = curBoxes();
+  // 后画的在上层，自顶向下命中
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    const b = boxes[i];
+    if (x >= Math.min(b.x0, b.x1) && x <= Math.max(b.x0, b.x1) &&
+        y >= Math.min(b.y0, b.y1) && y <= Math.max(b.y0, b.y1)) {
+      return b;
+    }
+  }
+  return null;
+}
+
+function localPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(canvas.width, e.clientX - r.left)),
+    y: Math.max(0, Math.min(canvas.height, e.clientY - r.top)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 鼠标 / 触摸
+// ---------------------------------------------------------------------------
+canvas.addEventListener("pointerdown", (e) => {
+  if (!state.sid || state.baked || state.busy) return;
+  canvas.setPointerCapture(e.pointerId);
+  const p = localPos(e);
+
+  if (state.mode === "erase") {
+    const hit = hitTest(p.x, p.y);
+    if (hit) deleteBox(hit);
+    return;
+  }
+
+  const hit = hitTest(p.x, p.y);
+  if (hit) { state.hoverId = hit.id; }   // 按住已有框不新建，留给 Delete
+  state.drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false, startHit: hit };
+  render();
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!state.sid || state.baked) return;
+  const p = localPos(e);
+  if (state.drag) {
+    state.drag.x1 = p.x; state.drag.y1 = p.y;
+    state.drag.moved = true;
+    render();
+  } else if (state.mode === "draw") {
+    const hit = hitTest(p.x, p.y);
+    state.hoverId = hit ? hit.id : null;
+    canvas.style.cursor = hit ? "pointer" : "crosshair";
+    render();
+  } else {
+    const hit = hitTest(p.x, p.y);
+    state.hoverId = hit ? hit.id : null;
+    canvas.style.cursor = hit ? "not-allowed" : "default";
+    render();
+  }
+});
+
+canvas.addEventListener("pointerup", async (e) => {
+  if (!state.drag || state.baked) { state.drag = null; return; }
+  const d = state.drag;
+  state.drag = null;
+  canvas.releasePointerCapture(e.pointerId);
+  const a = cssToPt(d.x0, d.y0), b = cssToPt(d.x1, d.y1);
+  const tiny = Math.abs(b.x - a.x) < MIN_BOX_PT || Math.abs(b.y - a.y) < MIN_BOX_PT;
+  // 点击（非拖动）落在已有框上：不新建，交给 Delete 或删除模式
+  if (d.moved && !tiny) {
+    await addBox({
+      x0: a.x, y0: a.y, x1: b.x, y1: b.y,
+      color: $("colorSelect").value,
+    });
+  } else {
+    render();
+  }
+});
+
+canvas.addEventListener("pointercancel", () => { state.drag = null; render(); });
+
+// ---------------------------------------------------------------------------
+// 与服务器同步框
+// ---------------------------------------------------------------------------
+async function addBox(rect) {
+  state.busy = true;
+  try {
+    const out = await api(`/api/${state.sid}/boxes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page, rect }),
+    });
+    state.boxes[state.page].push({ id: out.id, ...out.rect });
+    state.versions[state.page] = out.version;
+    applyStatusPayload(out);
+    render(); refreshBoxList(); refreshReviewUi();
+  } catch (err) { toast(err.message); render(); }
+  finally { state.busy = false; refreshChrome(); }
+}
+
+async function deleteBox(box) {
+  state.busy = true;
+  try {
+    const out = await api(`/api/${state.sid}/boxes/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page, id: box.id }),
+    });
+    state.boxes[state.page] = curBoxes().filter((b) => b.id !== box.id);
+    state.versions[state.page] = out.version;
+    applyStatusPayload(out);
+    state.hoverId = null;
+    render(); refreshBoxList(); refreshReviewUi();
+  } catch (err) { toast(err.message); }
+  finally { state.busy = false; refreshChrome(); }
+}
+
+async function clearPageBoxes() {
+  if (!curBoxes().length) return;
+  if (!confirm(`确定清空第 ${state.page + 1} 页的全部 ${curBoxes().length} 个遮盖框？`)) return;
+  state.busy = true;
+  try {
+    const out = await api(`/api/${state.sid}/boxes/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page }),
+    });
+    state.boxes[state.page] = [];
+    state.versions[state.page] = out.version;
+    applyStatusPayload(out);
+    render(); refreshBoxList(); refreshReviewUi();
+  } catch (err) { toast(err.message); }
+  finally { state.busy = false; refreshChrome(); }
+}
+
+// ---------------------------------------------------------------------------
+// 框列表 / 页面信息
+// ---------------------------------------------------------------------------
+function refreshBoxList() {
+  const ul = $("boxList");
+  ul.innerHTML = "";
+  const boxes = curBoxes();
+  $("boxCount").textContent = boxes.length ? `（${boxes.length}）` : "";
+  $("clearPageBtn").disabled = boxes.length === 0;
+  if (!boxes.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "本页暂无遮盖框";
+    ul.appendChild(li);
+    return;
+  }
+  boxes.forEach((b, i) => {
+    const li = document.createElement("li");
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = COLOR_HEX[b.color] || "#000";
+    li.appendChild(sw);
+    const txt = document.createElement("span");
+    txt.textContent = `#${i + 1}  ${Math.round(Math.min(b.x0,b.x1))},${Math.round(Math.min(b.y0,b.y1))} ` +
+                      `${Math.round(Math.abs(b.x1-b.x0))}×${Math.round(Math.abs(b.y1-b.y0))} pt`;
+    li.appendChild(txt);
+    const del = document.createElement("span");
+    del.className = "del"; del.textContent = "✕"; del.title = "删除";
+    li.appendChild(del);
+    li.addEventListener("click", () => deleteBox(b));
+    ul.appendChild(li);
+  });
+}
+
+function refreshChrome() {
+  const has = !!state.sid;
+  $("downloadBtn").disabled = !has || state.busy;
+  $("prevPageTop").disabled = !has || state.page === 0;
+  $("nextPageTop").disabled = !has || state.page === state.pages.length - 1;
+  $("pageBadge").textContent = has ? `${state.page + 1} / ${state.pages.length}` : "— / —";
+  if (has) {
+    const p = curPage();
+    const orient = p.width >= p.height ? "横向" : "纵向";
+    $("pageInfo").innerHTML =
+      `文件：${escapeHtml(state.filename)}<br>` +
+      `页数：${state.pages.length}　当前页：${p.width}×${p.height} pt<br>` +
+      `方向：${orient}　旋转标记：${p.rotation}°`;
+    $("fileBadge").textContent = state.filename;
+  }
+  $("stage").hidden = !has;
+  $("zoombar").hidden = !has;
+  refreshReviewUi();
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ---------------------------------------------------------------------------
+// 逐页复核 / 定版交付状态
+// ---------------------------------------------------------------------------
+function reviewOf(i) {
+  return state.reviews[i] || { confirmed: false, version: state.versions[i] ?? 0,
+                               boxCount: (state.boxes[i] || []).length };
+}
+function confirmedCount() {
+  return state.pages.reduce((n, p) => n + (reviewOf(p.index).confirmed ? 1 : 0), 0);
+}
+function allConfirmed() {
+  return state.pages.length > 0 && confirmedCount() === state.pages.length;
+}
+
+function applyStatusPayload(data) {
+  if (data && data.reviews) state.reviews = data.reviews;
+  if (data && Object.prototype.hasOwnProperty.call(data, "delivery"))
+    state.delivery = data.delivery;
+}
+
+function refreshReviewList() {
+  const ul = $("reviewList");
+  ul.innerHTML = "";
+  state.pages.forEach((p) => {
+    const rv = reviewOf(p.index);
+    const li = document.createElement("li");
+    li.className = (rv.confirmed ? "done " : "") +
+                   (p.index === state.page ? "current" : "");
+    const dot = document.createElement("span");
+    dot.className = "dot " + (rv.confirmed ? "done" : "pending");
+    dot.title = rv.confirmed ? "已复核" : "待复核";
+    li.appendChild(dot);
+    const name = document.createElement("span");
+    name.className = "pname";
+    name.textContent = `第 ${p.index + 1} 页`;
+    li.appendChild(name);
+    const st = document.createElement("span");
+    st.className = "pstatus";
+    st.textContent = rv.confirmed
+      ? `已复核 · ${rv.boxCount} 框`
+      : `待复核 · ${rv.boxCount} 框`;
+    li.appendChild(st);
+    li.title = "点击跳到该页";
+    li.addEventListener("click", () => gotoPage(p.index));
+    ul.appendChild(li);
+  });
+}
+
+function refreshReviewUi() {
+  const has = !!state.sid;
+  $("reviewBar").hidden = !has;
+  if (!has) { refreshDeliveryUi(); refreshReviewList(); return; }
+
+  const i = state.page;
+  const rv = reviewOf(i);
+  const curVer = state.versions[i] ?? 0;
+  $("rbPage").textContent = i + 1;
+  const tag = $("rbTag");
+  tag.textContent = rv.confirmed ? "已复核" : "待复核";
+  tag.classList.toggle("done", rv.confirmed);
+
+  const hint = $("rbHint"), stale = $("rbStale");
+  const btn = $("confirmPageBtn");
+  hint.hidden = false;
+  stale.hidden = true;
+  btn.disabled = true;
+
+  if (!state.baked) {
+    hint.textContent = "勾选“最终效果预览（服务器烘焙）”加载该页的实际烘焙画面后，方可确认本页。";
+  } else if (state.loadedVersion === null) {
+    hint.textContent = "正在加载服务器烘焙预览…";
+  } else if (state.loadedVersion !== curVer) {
+    // 画面烘焙后本页框又被（其他请求）改动 —— 旧画面不得标为已复核
+    hint.hidden = true;
+    stale.hidden = false;
+  } else {
+    hint.textContent = rv.confirmed
+      ? `本页已复核（绑定版本 ${curVer}，${rv.boxCount} 个框）。画面仍为当前版本，可重新确认。`
+      : `当前烘焙画面为版本 ${curVer}（${rv.boxCount} 个框）。确认即绑定此画面；之后框被改动须重新预览。`;
+    btn.disabled = false;
+  }
+  btn.textContent = rv.confirmed ? "✔ 本页已复核（可重新确认）"
+                                 : "✔ 确认本页（绑定当前烘焙画面）";
+
+  refreshReviewList();
+  refreshDeliveryUi();
+}
+
+function refreshDeliveryUi() {
+  const has = !!state.sid;
+  const n = has ? confirmedCount() : 0;
+  const total = state.pages.length;
+  const d = state.delivery;
+  const live = d && !d.revoked;
+  const label = total ? `已复核 ${n} / ${total} 页` : "";
+
+  for (const id of ["deliveryBtn", "deliverySideBtn"]) {
+    const b = $(id);
+    b.disabled = !has || state.busy || !allConfirmed();
+    b.textContent = id === "deliveryBtn"
+      ? "🏁 定版交付（ZIP）"
+      : (allConfirmed() ? "🏁 生成 / 下载定版 ZIP"
+                        : `🏁 全部确认后生成定版 ZIP（${label}）`);
+    b.title = allConfirmed()
+      ? (live ? "下载当前定版交付包（PDF + manifest.json）"
+              : "按当前各页确认生成定版交付包（PDF + manifest.json）")
+      : "所有页面（含无遮盖框的页）都须先逐页确认";
+  }
+
+  const note = $("deliveryNote");
+  if (!has || !d) {
+    note.hidden = true;
+    note.textContent = "";
+  } else {
+    note.hidden = false;
+    if (d.revoked) {
+      note.innerHTML = "⚠ 上一定版包已因遮盖框修改被撤销，旧包不可再下载；重新确认受影响页并生成新包。";
+    } else {
+      note.innerHTML =
+        `当前定版包：<span class="sha">SHA-256 ${escapeHtml(d.pdfSha256.slice(0, 16))}…</span><br>` +
+        `不再修改时重复下载得到相同的包内 PDF 与匹配摘要。`;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 翻页 / 缩放 / 工具切换
+// ---------------------------------------------------------------------------
+function gotoPage(i) {
+  if (!state.sid) return;
+  state.page = Math.max(0, Math.min(state.pages.length - 1, i));
+  state.hoverId = null; state.drag = null;
+  loadPageImage();
+  render(); refreshBoxList(); refreshChrome();
+}
+
+function setZoom(z) {
+  state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+  applyViewSize();
+  render();
+}
+
+function zoomFit() {
+  if (!curPage()) return;
+  const wrap = $("stageWrap");
+  const pad = 70;
+  const zW = (wrap.clientWidth - pad) / pageW();
+  const zH = (wrap.clientHeight - pad - 70) / pageH();
+  setZoom(Math.max(MIN_ZOOM, Math.min(1.5, Math.min(zW, zH))));
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  $("modeDraw").classList.toggle("active", mode === "draw");
+  $("modeErase").classList.toggle("active", mode === "erase");
+  canvas.classList.toggle("draw", mode === "draw");
+  canvas.classList.toggle("erase", mode === "erase");
+}
+
+$("modeDraw").addEventListener("click", () => setMode("draw"));
+$("modeErase").addEventListener("click", () => setMode("erase"));
+$("colorSelect").addEventListener("change", render);
+
+$("bakedToggle").addEventListener("change", async (e) => {
+  state.baked = e.target.checked;
+  canvas.style.pointerEvents = state.baked ? "none" : "";
+  $("bakedNote").hidden = !state.baked;
+  loadPageImage();
+  render();
+  refreshReviewUi();
+});
+
+$("zoomIn").addEventListener("click", () => setZoom(state.zoom * ZOOM_STEP));
+$("zoomOut").addEventListener("click", () => setZoom(state.zoom / ZOOM_STEP));
+$("zoomFit").addEventListener("click", zoomFit);
+$("prevPageTop").addEventListener("click", () => gotoPage(state.page - 1));
+$("nextPageTop").addEventListener("click", () => gotoPage(state.page + 1));
+$("clearPageBtn").addEventListener("click", clearPageBoxes);
+
+// ---------------------------------------------------------------------------
+// 逐页复核确认 / 定版交付
+// ---------------------------------------------------------------------------
+$("confirmPageBtn").addEventListener("click", async () => {
+  if (!state.sid || state.busy) return;
+  if (!state.baked || state.loadedVersion === null) return;
+  const page = state.page, version = state.loadedVersion;
+  state.busy = true; refreshChrome();
+  try {
+    const out = await api(`/api/${state.sid}/review/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page, version }),
+    });
+    state.versions[page] = out.version;
+    applyStatusPayload(out);
+    toast(`第 ${page + 1} 页已确认复核（${out.boxCount} 个框，版本 ${out.version}）。`, true);
+  } catch (err) {
+    toast(err.message);   // 409：画面过期，按提示重新加载烘焙预览
+    await syncFromState();
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+});
+
+async function downloadDelivery() {
+  if (!state.sid || state.busy || !allConfirmed()) return;
+  state.busy = true; refreshChrome();
+  try {
+    // 第一步：按当前各页确认生成（或复用）定版包；有失效确认时后端返回 409
+    let res = await fetch(
+      `/api/${state.sid}/delivery?filename=${encodeURIComponent(state.filename)}`,
+      { method: "POST" });
+    if (!res.ok) {
+      let detail = "生成定版包失败";
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const info = await res.json();
+    applyStatusPayload(info);
+
+    // 第二步：下载该定版包；若其间被编辑撤销，后端返回 410（拒绝过期包）
+    res = await fetch(`/api/${state.sid}/delivery/${info.deliveryId}`);
+    if (res.status === 410) {
+      await syncFromState();
+      throw new Error("定版包已因新的编辑被撤销，请重新复核后再生成。");
+    }
+    if (!res.ok) throw new Error("定版包下载失败");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = info.zipName;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast("定版交付包（位图遮盖 PDF + JSON 清单）已开始下载。", true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+}
+$("deliveryBtn").addEventListener("click", downloadDelivery);
+$("deliverySideBtn").addEventListener("click", downloadDelivery);
+$("rbReload").addEventListener("click", () => { if (state.baked) loadPageImage(); });
+
+// 周期性同步复核/交付状态：其他标签页或请求修改框时，本页状态及时失效
+async function syncFromState() {
+  if (!state.sid) return;
+  try {
+    const data = await api(`/api/${state.sid}/state`);
+    const serverVersions = {};
+    for (const [k, v] of Object.entries(data.versions || {})) serverVersions[k] = v;
+    const shown = state.loadedVersion;
+    const curShown = serverVersions[state.page] ?? 0;
+    state.boxes = {};
+    for (const [k, arr] of Object.entries(data.boxes || {})) state.boxes[k] = arr;
+    state.versions = serverVersions;
+    applyStatusPayload(data);
+    // 正在展示的烘焙画面若已落后于服务器版本，保持旧版本号 -> 界面显示"画面过期"
+    if (state.baked && shown !== null && shown !== curShown) {
+      state.loadedVersion = shown;
+    }
+    if (!state.drag) render();
+    refreshBoxList();
+    refreshChrome();
+  } catch (_) { /* 会话过期等情况保留当前界面，由用户操作触发提示 */ }
+}
+setInterval(syncFromState, 4000);
+
+img.addEventListener("error", () => toast("页面预览加载失败，请重试。"));
+
+document.addEventListener("keydown", (e) => {
+  if (!state.sid || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.key === "Delete" || e.key === "Backspace") {
+    if (state.hoverId) {
+      const b = curBoxes().find((x) => x.id === state.hoverId);
+      if (b) { e.preventDefault(); deleteBox(b); }
+    }
+  } else if (e.key === "ArrowLeft") gotoPage(state.page - 1);
+  else if (e.key === "ArrowRight") gotoPage(state.page + 1);
+  else if (e.key === "+" || e.key === "=") setZoom(state.zoom * ZOOM_STEP);
+  else if (e.key === "-") setZoom(state.zoom / ZOOM_STEP);
+  else if (e.key.toLowerCase() === "d") setMode("draw");
+  else if (e.key.toLowerCase() === "e") setMode("erase");
+});
+
+// Ctrl+滚轮缩放（普通滚轮留给滚动条）
+$("stageWrap").addEventListener("wheel", (e) => {
+  if (e.ctrlKey && state.sid) {
+    e.preventDefault();
+    setZoom(state.zoom * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP));
+  }
+}, { passive: false });
+
+// ---------------------------------------------------------------------------
+// 上传
+// ---------------------------------------------------------------------------
+$("fileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+
+  // 先校验扩展名/MIME，上传失败时保留当前正在编辑的文档不动
+  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+    toast("请选择 PDF 文件。");
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  state.busy = true; $("downloadBtn").disabled = true;
+  try {
+    const out = await fetch("/api/upload", { method: "POST", body: fd });
+    if (!out.ok) {
+      let detail = "上传失败";
+      try { detail = (await out.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const data = await out.json();
+    // 仅在服务器完整校验通过后才切换会话，避免覆盖正在编辑的文档
+    state.sid = data.session;
+    state.filename = data.filename;
+    state.pages = data.pages;
+    state.page = 0;
+    state.boxes = Object.fromEntries(data.pages.map((p) => [p.index, []]));
+    state.versions = Object.fromEntries(data.pages.map((p) => [p.index, 0]));
+    state.reviews = {};
+    state.delivery = null;
+    state.loadedVersion = null;
+    state.baked = false;
+    $("bakedToggle").checked = false;
+    $("bakedNote").hidden = true;
+    canvas.style.pointerEvents = "";
+    refreshChrome();
+    refreshBoxList();
+    zoomFit();
+    loadPageImage();
+    render();
+    toast(`已打开：${data.filename}（${data.pageCount} 页）`, true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 下载
+// ---------------------------------------------------------------------------
+$("downloadBtn").addEventListener("click", async () => {
+  if (!state.sid || state.busy) return;
+  state.busy = true; $("downloadBtn").disabled = true;
+  try {
+    const res = await fetch(`/api/${state.sid}/download?filename=${encodeURIComponent(state.filename)}`);
+    if (!res.ok) {
+      let detail = "生成失败";
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = state.filename.replace(/\.pdf$/i, "") + "-redacted.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast("遮盖副本已生成并开始下载。", true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+});
+
+// 初始化
+setMode("draw");
+refreshChrome();
+</script>
+</body>
+</html>
