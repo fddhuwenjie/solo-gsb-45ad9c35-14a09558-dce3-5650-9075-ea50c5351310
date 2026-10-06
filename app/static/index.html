@@ -58,6 +58,12 @@
     border: 1px solid var(--line); border-radius: 6px; padding: 5px;
   }
   select { flex: 1; }
+  input[type="text"] {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+    width: 100%;
+  }
+  input[type="text"]:focus { border-color: var(--accent); outline: none; }
   .hint { color: var(--muted); font-size: 12px; }
   .hint kbd {
     background: var(--panel2); border: 1px solid var(--line);
@@ -69,10 +75,13 @@
     border-radius: 5px; font-size: 12px; cursor: pointer;
   }
   ul.boxlist li:hover { background: var(--panel2); }
+  ul.boxlist li.current { border: 1px solid var(--accent); }
+  ul.boxlist li input[type="checkbox"] { flex: none; margin: 0; }
   ul.boxlist .swatch { width: 12px; height: 12px; border-radius: 2px;
     border: 1px solid rgba(255,255,255,.3); flex: none; }
   ul.boxlist .del { margin-left: auto; color: var(--danger); }
   ul.boxlist .empty { color: var(--muted); cursor: default; }
+  .hint.warn { color: var(--warn); }
 
   /* 预览区 */
   .stage-wrap { flex: 1; overflow: auto; padding: 24px; position: relative; }
@@ -187,6 +196,27 @@
       若期间框被改动，须重新加载预览，不能确认旧画面。
     </div>
 
+    <h2>检索辅助遮盖</h2>
+    <input type="text" id="searchInput" maxlength="200"
+           placeholder="输入原文中的短语（字面匹配）">
+    <button class="btn" id="searchBtn" style="width:100%;margin-top:6px" disabled>
+      🔎 检索当前 PDF 文字
+    </button>
+    <div class="hint" id="searchInfo" style="margin-top:6px"></div>
+    <ul class="boxlist" id="searchList" style="max-height:170px"></ul>
+    <div class="row" id="searchActions" hidden>
+      <button class="btn" id="searchAllBtn" style="flex:1">全选</button>
+      <button class="btn" id="searchNoneBtn" style="flex:1">全不选</button>
+    </div>
+    <button class="btn primary" id="applySearchBtn" style="width:100%" hidden>
+      ✔ 提交选中为黑色遮盖框
+    </button>
+    <div class="hint" id="searchHint" hidden style="margin-top:6px">
+      命中仅以橙色标在预览上，不改变副本与复核状态；提交后才把勾选且未被现有框
+      完全覆盖的区域转为黑色框。检索后若相关页的框被改动，提交会被整批拒绝，
+      需重新检索。
+    </div>
+
     <h2>本页遮盖框 <span class="hint" id="boxCount"></span></h2>
     <ul class="boxlist" id="boxList"></ul>
     <button class="btn danger" id="clearPageBtn" style="width:100%;margin-top:8px" disabled>
@@ -222,6 +252,7 @@
       <p style="margin:4px 0">· 删除模式：点击框删除；或在画框模式悬停框后按 <kbd>Delete</kbd>。</p>
       <p style="margin:4px 0">· <kbd>←</kbd> <kbd>→</kbd> 翻页，<kbd>+</kbd> <kbd>−</kbd> 缩放，<kbd>D</kbd>/<kbd>E</kbd> 切换工具。</p>
       <p style="margin:4px 0">· 坐标以 PDF 点存储，任意缩放下框都锚定相同内容；旋转页与裁切页同样准确。</p>
+      <p style="margin:4px 0">· 检索辅助：输入短语检索原文，勾选命中后提交才生成黑色框；检索后若框被改动需重新检索。</p>
     </div>
   </aside>
 
@@ -258,6 +289,7 @@ const state = {
   versions: {},              // pageIndex -> 服务器遮盖版本号
   reviews: {},               // pageIndex(str) -> {confirmed,version,boxCount,confirmedVersion,...}
   delivery: null,            // {id,pdfSha256,zipName,revoked,builtAt}
+  search: null,              // 最近一次检索 {searchId,query,hits,selected:Set,pageVersions,truncated}
   page: 0,
   zoom: 1.0,
   imgScale: 1,               // CSS 像素 -> PDF 点 的系数（随底图尺寸更新）
@@ -396,6 +428,27 @@ function render() {
       y1: state.drag.y1 * state.imgScale,
       color: $("colorSelect").value,
     }, { preview: true });
+  }
+  drawSearchMarks();
+}
+
+// 检索命中标记：仅画在预览 canvas 上（橙色），提交前不影响副本与复核状态
+function drawSearchMarks() {
+  const s = state.search;
+  if (!s) return;
+  for (const h of s.hits) {
+    if (h.page !== state.page) continue;
+    const sel = s.selected.has(h.id);
+    const x = ptToCssPx(h.rect.x0), y = ptToCssPx(h.rect.y0);
+    const w = ptToCssPx(h.rect.x1 - h.rect.x0);
+    const hh = ptToCssPx(h.rect.y1 - h.rect.y0);
+    ctx.fillStyle = sel ? "rgba(245, 158, 11, 0.30)" : "rgba(245, 158, 11, 0.10)";
+    ctx.fillRect(x, y, w, hh);
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeStyle = "#f59e0b";
+    ctx.setLineDash(sel ? [] : [4, 3]);
+    ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, hh - 1));
+    ctx.setLineDash([]);
   }
 }
 
@@ -536,6 +589,146 @@ async function clearPageBoxes() {
 }
 
 // ---------------------------------------------------------------------------
+// 原文检索辅助遮盖（检索 -> 勾选 -> 提交为黑色遮盖框）
+// ---------------------------------------------------------------------------
+function searchStaleNow() {
+  // 检索后任何命中页的框版本发生变化 -> 提交必被后端整批拒绝，提示重新检索
+  const s = state.search;
+  if (!s) return false;
+  return s.hits.some((h) => (state.versions[h.page] ?? 0) !== s.pageVersions[h.page]);
+}
+
+function refreshSearchUi() {
+  const has = !!state.sid;
+  $("searchBtn").disabled = !has || state.busy;
+  const s = state.search;
+  const info = $("searchInfo");
+  if (!has || !s) {
+    info.textContent = "";
+    info.classList.remove("warn");
+    $("searchHint").hidden = !has;
+    $("searchActions").hidden = true;
+    $("applySearchBtn").hidden = true;
+    return;
+  }
+  const stale = searchStaleNow();
+  info.textContent = `“${s.query}” 命中 ${s.hits.length} 处` +
+    (s.truncated ? "（已达上限，仅列前 500 处）" : "") +
+    (stale ? " — ⚠ 检索后相关页的框已被修改，提交将被拒绝，请重新检索。" : "");
+  info.classList.toggle("warn", stale);
+  $("searchHint").hidden = false;
+  $("searchActions").hidden = false;
+  const btn = $("applySearchBtn");
+  btn.hidden = false;
+  btn.disabled = state.busy || stale || s.selected.size === 0;
+  btn.textContent = `✔ 提交选中（${s.selected.size}）为黑色遮盖框`;
+}
+
+function refreshSearchList() {
+  const ul = $("searchList");
+  ul.innerHTML = "";
+  const s = state.search;
+  if (!s) return;
+  s.hits.forEach((h, idx) => {
+    const li = document.createElement("li");
+    if (h.page === state.page) li.classList.add("current");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = s.selected.has(h.id);
+    cb.addEventListener("change", () => {
+      if (cb.checked) s.selected.add(h.id); else s.selected.delete(h.id);
+      refreshSearchUi();
+      render();
+    });
+    li.appendChild(cb);
+    const txt = document.createElement("span");
+    txt.textContent = `第 ${h.page + 1} 页 · #${idx + 1}`;
+    txt.title = "点击跳到该页";
+    txt.addEventListener("click", () => gotoPage(h.page));
+    li.appendChild(txt);
+    ul.appendChild(li);
+  });
+}
+
+async function doSearch() {
+  if (!state.sid || state.busy) return;
+  const q = $("searchInput").value.trim();
+  if (!q) { toast("请输入要检索的非空短语。"); return; }
+  state.busy = true; refreshChrome();
+  try {
+    const out = await api(`/api/${state.sid}/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q }),
+    });
+    state.search = {
+      searchId: out.searchId,
+      query: out.query,
+      hits: out.hits,
+      pageVersions: out.pageVersions,
+      truncated: out.truncated,
+      selected: new Set(out.hits.map((h) => h.id)),   // 默认全选，可逐条取消
+    };
+    refreshSearchList(); refreshSearchUi(); render();
+    if (!out.hits.length) {
+      toast("未在当前 PDF 的可提取文字中找到该短语。");
+    } else {
+      if (out.hits[0].page !== state.page) gotoPage(out.hits[0].page);
+      toast(`检索到 ${out.hits.length} 处命中，已在页面预览上标出。`, true);
+    }
+  } catch (err) { toast(err.message); }
+  finally { state.busy = false; refreshChrome(); }
+}
+
+async function applySearch() {
+  const s = state.search;
+  if (!state.sid || state.busy || !s) return;
+  const ids = s.hits.filter((h) => s.selected.has(h.id)).map((h) => h.id);
+  if (!ids.length) { toast("请先勾选要转为遮盖框的命中。"); return; }
+  state.busy = true; refreshChrome();
+  try {
+    const out = await api(`/api/${state.sid}/search/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ searchId: s.searchId, hitIds: ids }),
+    });
+    state.boxes = out.boxes;
+    state.versions = out.versions;
+    applyStatusPayload(out);
+    state.search = null;                 // 标记已转为真实遮盖框
+    refreshSearchList(); refreshSearchUi();
+    render(); refreshBoxList(); refreshChrome();
+    if (out.added > 0) {
+      toast(`已把 ${out.added} 处命中转为黑色遮盖框（${out.addedPages.length} 页）` +
+            (out.skippedCovered ? `，${out.skippedCovered} 处已被现有框完全覆盖` : "") +
+            "；相关页需重新复核。", true);
+    } else {
+      toast("所选命中均已被现有遮盖框完全覆盖，未添加新框、未改变任何版本。", true);
+    }
+  } catch (err) {
+    toast(err.message);   // 409：检索后框已变化 / 检索已失效，按提示重新检索
+    await syncFromState();
+    refreshSearchUi();
+  } finally { state.busy = false; refreshChrome(); }
+}
+
+$("searchBtn").addEventListener("click", doSearch);
+$("applySearchBtn").addEventListener("click", applySearch);
+$("searchInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); doSearch(); }
+});
+$("searchAllBtn").addEventListener("click", () => {
+  if (!state.search) return;
+  state.search.selected = new Set(state.search.hits.map((h) => h.id));
+  refreshSearchList(); refreshSearchUi(); render();
+});
+$("searchNoneBtn").addEventListener("click", () => {
+  if (!state.search) return;
+  state.search.selected.clear();
+  refreshSearchList(); refreshSearchUi(); render();
+});
+
+// ---------------------------------------------------------------------------
 // 框列表 / 页面信息
 // ---------------------------------------------------------------------------
 function refreshBoxList() {
@@ -587,6 +780,7 @@ function refreshChrome() {
   $("stage").hidden = !has;
   $("zoombar").hidden = !has;
   refreshReviewUi();
+  refreshSearchUi();
 }
 
 function escapeHtml(s) {
@@ -727,7 +921,7 @@ function gotoPage(i) {
   state.page = Math.max(0, Math.min(state.pages.length - 1, i));
   state.hoverId = null; state.drag = null;
   loadPageImage();
-  render(); refreshBoxList(); refreshChrome();
+  render(); refreshBoxList(); refreshSearchList(); refreshChrome();
 }
 
 function setZoom(z) {
@@ -922,6 +1116,8 @@ $("fileInput").addEventListener("change", async (e) => {
     state.versions = Object.fromEntries(data.pages.map((p) => [p.index, 0]));
     state.reviews = {};
     state.delivery = null;
+    state.search = null;
+    $("searchInput").value = "";
     state.loadedVersion = null;
     state.baked = false;
     $("bakedToggle").checked = false;
@@ -929,6 +1125,7 @@ $("fileInput").addEventListener("change", async (e) => {
     canvas.style.pointerEvents = "";
     refreshChrome();
     refreshBoxList();
+    refreshSearchList();
     zoomFit();
     loadPageImage();
     render();

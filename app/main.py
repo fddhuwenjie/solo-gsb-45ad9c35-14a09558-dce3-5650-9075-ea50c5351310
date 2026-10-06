@@ -49,6 +49,8 @@ RENDER_DPI = 200              # 副本位图渲染分辨率（像素/英寸）
 RENDER_ZOOM = RENDER_DPI / 72.0
 MAX_SESSIONS = 8              # 内存中同时保留的会话数量（单机单人使用）
 SESSION_TTL = 60 * 60         # 会话闲置 1 小时后丢弃
+MAX_QUERY_LEN = 200           # 原文检索短语的长度上限（字符）
+MAX_SEARCH_HITS = 500         # 单次检索最多返回 / 可提交的命中数
 
 # 允许的遮盖颜色（前端拾色器之外的输入一律拒绝）
 ALLOWED_COLORS: dict[str, tuple[int, int, int]] = {
@@ -109,6 +111,30 @@ class Delivery:
 
 
 @dataclass
+class SearchHit:
+    """一次字面检索的单个命中区域（显示坐标系，点）。"""
+    id: str
+    page: int
+    rect: tuple[float, float, float, float]
+
+
+@dataclass
+class StoredSearch:
+    """
+    会话内**最近一次**检索的结果，以及检索那一刻各页遮盖框的版本快照。
+
+    提交只接受这一份（最新）检索的命中；快照用于发现"检索之后框被改动"：
+    任何所选页的版本与快照不一致时，整批拒绝、不修改任何页面。
+    仅保存检索结果不会改变遮盖副本、版本或复核状态。
+    """
+    search_id: str
+    query: str
+    hits: list[SearchHit]
+    page_versions: dict[int, int]
+    at: float
+
+
+@dataclass
 class Session:
     pdf_bytes: bytes
     pages: list[dict[str, Any]]
@@ -118,6 +144,7 @@ class Session:
     # 已复核页 -> Confirmation（version/box_count 与当前不一致即视为失效）
     reviews: dict[int, Confirmation] = field(default_factory=dict)
     delivery: Delivery | None = None
+    search: StoredSearch | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     last_used: float = field(default_factory=time.time)
 
@@ -220,6 +247,37 @@ def _validate_rect(rect: Rect, page: fitz.Page, index: int | None = None) -> Rec
     if r.color not in ALLOWED_COLORS:
         raise HTTPException(status_code=400, detail="不支持的遮盖颜色。")
     return r
+
+
+def _rect_fully_covered(rect: tuple[float, float, float, float],
+                        boxes: list[Rect]) -> bool:
+    """
+    rect（显示坐标元组）是否被 boxes 的并集**完全**覆盖。
+
+    用每个框对剩余区域逐次求差（一个矩形减去一个矩形最多剩 4 条），
+    全部减完即完全覆盖。所有遮盖框都是不透明填充，颜色不影响覆盖判定。
+    """
+    remaining = [rect]
+    for b in boxes:
+        bx0, by0 = min(b.x0, b.x1), min(b.y0, b.y1)
+        bx1, by1 = max(b.x0, b.x1), max(b.y0, b.y1)
+        nxt: list[tuple[float, float, float, float]] = []
+        for (x0, y0, x1, y1) in remaining:
+            if bx1 <= x0 or bx0 >= x1 or by1 <= y0 or by0 >= y1:
+                nxt.append((x0, y0, x1, y1))              # 与该框无交
+                continue
+            if y0 < by0:                                  # 上侧剩余条
+                nxt.append((x0, y0, x1, by0))
+            if y1 > by1:                                  # 下侧剩余条
+                nxt.append((x0, by1, x1, y1))
+            if x0 < bx0:                                  # 左侧剩余条（仅中间高度）
+                nxt.append((x0, max(y0, by0), bx0, min(y1, by1)))
+            if x1 > bx1:                                  # 右侧剩余条
+                nxt.append((bx1, max(y0, by0), x1, min(y1, by1)))
+        remaining = nxt
+        if not remaining:
+            return True
+    return False
 
 
 def _fill_pixmap_rect(pix: fitz.Pixmap, px0: int, py0: int,
@@ -350,6 +408,16 @@ def build_redacted_pdf(session: Session) -> tuple[bytes, int]:
 # 逐页复核与定版交付
 # ---------------------------------------------------------------------------
 
+def _boxes_payload_locked(s: Session) -> dict[str, Any]:
+    """各页遮盖框的可序列化表示（调用方持锁），与 /state 中的 boxes 一致。"""
+    return {
+        str(p): [{"id": b.id, **{k: getattr(b, k)
+                                 for k in ("x0", "y0", "x1", "y1", "color")}}
+                 for b in rects]
+        for p, rects in s.boxes.items()
+    }
+
+
 def _review_map_locked(s: Session) -> dict[str, Any]:
     """各页复核状态（调用方持锁）。confirmed 仅在版本与框数都对得上时为真。"""
     out: dict[str, Any] = {}
@@ -475,6 +543,16 @@ class ReviewIn(BaseModel):
     version: int = Field(ge=0)
 
 
+class SearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=MAX_QUERY_LEN)
+
+
+class SearchApplyIn(BaseModel):
+    # 必须是本会话最近一次检索返回的 searchId；否则 409
+    searchId: str = Field(min_length=1, max_length=64)
+    hitIds: list[str] = Field(default_factory=list, max_length=MAX_SEARCH_HITS)
+
+
 # ---------------------------------------------------------------------------
 # FastAPI 应用
 # ---------------------------------------------------------------------------
@@ -520,12 +598,7 @@ def state(sid: str) -> dict[str, Any]:
     with s.lock:
         return {
             "pages": s.pages,
-            "boxes": {
-                str(p): [{"id": b.id, **{k: getattr(b, k)
-                                         for k in ("x0", "y0", "x1", "y1", "color")}}
-                         for b in rects]
-                for p, rects in s.boxes.items()
-            },
+            "boxes": _boxes_payload_locked(s),
             "versions": {str(p): v for p, v in s.versions.items()},
             "reviews": _review_map_locked(s),
             "delivery": _delivery_info_locked(s),
@@ -606,6 +679,133 @@ def clear_page_boxes(sid: str, payload: PageOnlyIn) -> dict[str, Any]:
                 "page": payload.page,
                 "version": s.versions.get(payload.page, 0),
                 **_status_payload_locked(s)}
+
+
+# ---------------------------------------------------------------------------
+# 原文检索辅助遮盖（检索 -> 勾选 -> 提交为黑色遮盖框）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/{sid}/search")
+def search_text(sid: str, payload: SearchIn) -> dict[str, Any]:
+    """
+    在当前 PDF 的可提取文字中检索非空字面短语（逐字匹配、非正则）。
+
+    命中矩形换算到**显示坐标系**：search_for 返回未旋转、相对 CropBox 的坐标，
+    乘 page.rotation_matrix 即预览/遮盖框使用的显示坐标，旋转页与裁切页同样对齐。
+    命中按页码、页内自上而下/自左而右排序返回，并暂存于会话（含各页版本快照）。
+
+    检索本身不修改任何遮盖框、版本或复核状态；只有 /search/apply 才会添框。
+    """
+    s = get_session(sid)
+    query = payload.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="检索短语不能为空。")
+    with s.lock:
+        found: list[tuple[int, tuple[float, float, float, float]]] = []
+        doc = fitz.open(stream=io.BytesIO(s.pdf_bytes), filetype="pdf")
+        try:
+            for i in range(len(s.pages)):
+                page = doc.load_page(i)
+                rot = page.rotation_matrix
+                pw, ph = s.pages[i]["width"], s.pages[i]["height"]
+                for r in (page.search_for(query) or []):
+                    d = r * rot      # 未旋转页面坐标 -> 显示坐标
+                    x0 = max(0.0, min(d.x0, pw)); y0 = max(0.0, min(d.y0, ph))
+                    x1 = max(0.0, min(d.x1, pw)); y1 = max(0.0, min(d.y1, ph))
+                    if x1 - x0 < 0.5 or y1 - y0 < 0.5:
+                        continue     # 退化区域无法成为有效遮盖框
+                    found.append((i, (round(x0, 2), round(y0, 2),
+                                      round(x1, 2), round(y1, 2))))
+        finally:
+            doc.close()
+        # 页码优先，页内自上而下、自左而右
+        found.sort(key=lambda t: (t[0], t[1][1], t[1][0]))
+        truncated = len(found) > MAX_SEARCH_HITS
+        found = found[:MAX_SEARCH_HITS]
+        hits = [SearchHit(id=f"h{n}", page=p, rect=rect)
+                for n, (p, rect) in enumerate(found)]
+        stored = StoredSearch(
+            search_id=uuid.uuid4().hex,
+            query=query,
+            hits=hits,
+            page_versions={i: s.versions.get(i, 0) for i in range(len(s.pages))},
+            at=time.time(),
+        )
+        s.search = stored
+        return {
+            "searchId": stored.search_id,
+            "query": query,
+            "hitCount": len(hits),
+            "truncated": truncated,
+            "hits": [{"id": h.id, "page": h.page,
+                      "rect": dict(zip(("x0", "y0", "x1", "y1"), h.rect))}
+                     for h in hits],
+            "pageVersions": {str(p): v for p, v in stored.page_versions.items()},
+        }
+
+
+@app.post("/api/{sid}/search/apply")
+def search_apply(sid: str, payload: SearchApplyIn) -> dict[str, Any]:
+    """
+    把本次检索中勾选的命中转为**黑色**遮盖框。
+
+    * 只接受会话内**最近一次**检索的 searchId 与命中 id，否则 409/400；
+    * 检索之后任何**所选页**的遮盖框发生变化（版本与快照不一致）时，
+      整批拒绝（409），不修改任何页面，需重新检索后再提交；
+    * 已被现有遮盖框**完全覆盖**的命中跳过，不重复添框；
+    * 只为实际添框的页推进版本（这些页待重新复核、旧交付包撤销），
+      其他页的确认保留；空选择 / 全部命中均被覆盖时不改任何版本。
+    """
+    s = get_session(sid)
+    with s.lock:
+        stored = s.search
+        if stored is None or stored.search_id != payload.searchId:
+            raise HTTPException(
+                status_code=409,
+                detail="该检索结果已失效（尚未检索或已有新的检索），请重新检索后再提交。")
+        by_id = {h.id: h for h in stored.hits}
+        wanted = list(dict.fromkeys(payload.hitIds))     # 去重保序
+        if any(hid not in by_id for hid in wanted):
+            raise HTTPException(
+                status_code=400,
+                detail="提交包含不属于该次检索的命中，请重新检索后再勾选。")
+        # 按检索时的页码 / 页内顺序处理
+        chosen = set(wanted)
+        selected = [h for h in stored.hits if h.id in chosen]
+
+        # 冲突检查：检索后任何所选页的框发生变化 -> 整批拒绝，不修改任何页面
+        touched = sorted({h.page for h in selected})
+        stale = [p for p in touched
+                 if s.versions.get(p, 0) != stored.page_versions.get(p, 0)]
+        if stale:
+            raise HTTPException(
+                status_code=409,
+                detail=("检索后第 " + "、".join(str(p + 1) for p in stale)
+                        + " 页的遮盖框已发生变化，本次提交已整批拒绝"
+                        "（未修改任何页面），请重新检索后再提交。"))
+
+        added_per_page: dict[int, int] = {}
+        covered = 0
+        for h in selected:
+            boxes = s.boxes[h.page]
+            if _rect_fully_covered(h.rect, boxes):
+                covered += 1
+                continue
+            x0, y0, x1, y1 = h.rect
+            boxes.append(Rect(x0, y0, x1, y1, "black"))
+            added_per_page[h.page] = added_per_page.get(h.page, 0) + 1
+        # 只推进实际添框页的版本（这些页待重新复核、旧交付包随之撤销）
+        for p in sorted(added_per_page):
+            _bump_page_locked(s, p)
+        return {
+            "applied": True,
+            "added": sum(added_per_page.values()),
+            "addedPages": sorted(added_per_page),
+            "skippedCovered": covered,
+            "boxes": _boxes_payload_locked(s),
+            "versions": {str(p): v for p, v in s.versions.items()},
+            **_status_payload_locked(s),
+        }
 
 
 @app.get("/api/{sid}/download")
